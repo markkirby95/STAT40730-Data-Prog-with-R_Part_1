@@ -468,7 +468,7 @@ ggmap(map) +
 
 From Figure \@ref(fig:mapping4) all parks in the data set can be seen on the map with the colour indicating the type of park.
 
-I have also created animated versions of the map plots, unfortunately they will not be usable in pdf format therefore I have stored the animated versions on my github account here
+I have also created animated versions of the map plots, unfortunately they will not be usable in pdf format therefore I have stored the animated versions on my github account here: https://markkirby95.github.io/STAT40730-Data-Prog-with-R_Part_1/
 
 I am including the code for this graphs below.
 ```{r animatedmap, fig.align='center', fig.cap="Map of South Dublin."}
