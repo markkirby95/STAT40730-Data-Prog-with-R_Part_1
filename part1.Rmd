@@ -1,0 +1,525 @@
+---
+title: "Project"
+author: "Mark Kirby"
+date: "23/12/2020"
+output:
+  bookdown::html_document2:
+    df_print: paged
+    number_sections: false
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(reshape2)
+library(randomcoloR)
+library(tidyverse)
+library(rgdal)
+library(osmdata)
+library(sf)
+library(ggmap)
+library(plotly)
+```
+
+# Final Project
+
+## Section 1: Analysis
+For the analysis section of this project I have chosen to examine a dataset containing information about parks and open spaces in south county Dublin which can be found at the following website: https://data.gov.ie/dataset/parks-and-open-spaces1
+
+This dataset contains information on the size of the space, the category the space falls into, the location of the space and several other variables pertaining to the facilities available at the space.
+
+#### 1.1 Data Cleaning
+
+As usual the first step in any analysis is to read in the data.
+```{r readin}
+# Reading in the data to be analysed
+# Keeping character fields as characters
+parks <- read.csv('Parks_and_Recreation.csv', stringsAsFactors = FALSE)
+# Changing the name of the first column in the data
+names(parks)[1] <- "OBJECTID"
+head(parks)
+```
+
+The data contains `r nrow(parks)` rows and `r ncol(parks)` columns.
+
+Once the data has been read in we check for missing values, redundant variables or anything else strange that might be present in the data which needs to be removed or fixed before we carry out any analysis. Firstly we check for NA's in the data.
+```{r missingvalues}
+colSums(is.na(parks))
+parks <- subset(parks, select = -c(SourceFunding, SummaryActivities))
+```
+
+We can see from the output that the variables *SourceFunding* and *SummaryActivities* contain only missing values, therefore we remove them from the data. Next we check the data for blank values
+```{r blankvalues}
+colSums(parks == '')
+# Removing mostly blank columns
+parks <- subset(parks, select = -c(created_user, created_date, OpeningHours))
+```
+
+We can see from the previous output that the columns *created_user*, *created_date* and *OpeningHours* are filled with mostly blank values therefore I have decided to remove them from the data.
+
+We can also see that the columns *Allotments*, *CCTV*, *FairyWood* and *Fishery* contain a few blank values. These columns are all indicators of whether or not a certain facility is available at the park. In this case it is appropriate to assume they are not available unless stated otherwise so I have converted these blank values in the value "No".
+
+```{r blankvalues2}
+# Removing blank values in certain columns
+cols_2_edit <- c("Allotments", "CCTV", "FairyWood", "Fishery")
+parks[,cols_2_edit][parks[,cols_2_edit] == ''] <- 'No'
+
+```
+
+The next step in cleaning the data is to check how many columns are redundant i.e. only contain one value.
+```{r redundant}
+# Count the number of unique values
+print(parks %>% summarise_all(n_distinct))
+# Remove redundant columns
+parks <- subset(parks, select = -c(DisabilityAccess, SDCC_Owned, last_edited_user))
+```
+
+We can see that the columns *DisabilityAccess*, *SDCC_Owned*, and *last_edited_user* only contain one value, therefore I have decide to remove them from the data.
+
+After this data cleansing we are left with a smaller dataset with `r nrow(parks)` rows and `r ncol(parks)` columns.
+
+#### 1.2 Park Area Analysis
+Now we will analyse the data and extract some insights about the parks and open spaces in south county Dublin. 
+
+Firstly we can look at a table of summary statistics for the size of the parks and open spaces in south Dublin. The unit of measurement for the size of each park is $m^2$
+```{r summarystats}
+sum_tab <- parks %>% summarise(count = n(),
+                               mean = mean(ShapeSTArea),
+                               min = min(ShapeSTArea),
+                               max = max(ShapeSTArea),
+                               median = median(ShapeSTArea),
+                               first_quartile = quantile(ShapeSTArea, prob = 0.25),
+                               third_quartile = quantile(ShapeSTArea, prob = 0.75))
+
+knitr::kable(round(sum_tab))
+```
+
+From this output we can see that there are 69 parks in South Dublin, the largest park (`r parks$Name[parks$ShapeSTArea > 1369070]`) is approximately 1369076$m^2$ and the smallest park (`r parks$Name[parks$ShapeSTArea < 86]`) is approximately 86$m^2$. It is worth noting that this data only contains parks that South Dublin County Council are responsible for so the Phoenix Park is not present in this data. Some other large parks such as Tymon park are also split into several pieces in this data.
+
+The mean value for a park in South Dublin is 151418.9 while the median value is 69619.99.
+
+Next we create a visual depiction of the distribution of park areas in South Dublin.
+
+```{r densityplot, fig.align='center', fig.width = 10, fig.cap="Density plots for the area of parks in South Dublin."}
+# Creating a density plot of park area
+p <- ggplot(parks, aes(x=ShapeSTArea)) + 
+  geom_density(fill="lightblue") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title="Park Area Density Plot",x=expression("Park Area "(m^2)), y = "Density") +
+  theme(plot.title = element_text(hjust = 0.5))
+# Creating a density plot of the log park area for readability
+q <- ggplot(parks, aes(x=log(ShapeSTArea))) + 
+  geom_density(fill="lightblue") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title="Log of Park Area Density Plot",x=expression("Log Park Area "(m^2)), y = "Density") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(p, q, ncol=2)
+```
+
+In Figure \@ref(fig:densityplot) we create two density plots. One is a density plot based on the area of parks in South Dublin. The second is a density plot of the log of the area of parks in South Dublin. The second plot is added as the first plot is a little bit difficult to read.
+
+These plots tell us that the majority of parks have areas of less than 250,000$m^2$ with only a few parks having areas greater than that.
+
+If we examine each park individually we can also see some interesting insights
+```{r lollipop, fig.align='center', fig.width = 10,fig.height = 7,  fig.cap="Plots of individual park area for parks in South Dublin."}
+# Creating a lollipop plot of each parks size
+plot1 <- parks %>%
+  ggplot(aes(x=Name, y=ShapeSTArea)) +
+    geom_segment( aes(x=Name, xend=Name, y=0, yend=ShapeSTArea), color="skyblue") +
+    geom_point( color="blue", size=4, alpha=0.6) +
+    theme_light() +
+  scale_y_continuous(labels = scales::comma) +
+    coord_flip() +
+  labs(title="Park Area Lollipop Plot",
+       y=expression("Park Area "(m^2)),
+       x = "Name") +
+    theme(
+      panel.grid.major.y = element_blank(),
+      panel.border = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.title = element_text(hjust = 0.5),
+      axis.text.y = element_text(color = "grey20", size = 6,
+                                 angle = 0, hjust = 1, 
+                                 vjust = 0, face = "plain") )
+# Creating a bar plot of each parks size
+plot2 <- parks %>%
+  mutate(Name = fct_reorder(Name, desc(-ShapeSTArea))) %>%
+  ggplot( aes(x=Name, y=ShapeSTArea)) +
+  geom_bar(stat="identity", fill="lightblue", width=.8) +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  labs(title="Park Area Bar Plot",
+       y=expression("Park Area "(m^2)),
+       x = "Name") +
+  theme(axis.text.y = element_text(color = "grey20", 
+                                   size = 6, angle = 0, 
+                                   hjust = 1, vjust = 0,
+                                   face = "plain"),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(plot1, plot2, ncol=2)
+```
+
+Figure \@ref(fig:lollipop) shows where each park falls in terms of overall area. As mentioned above we can see that some large parks such as Tymon Park and Griffeen Park have actually been split into different pieces. In the next step we rejoin these pieces and examine the effect it has on the output.
+
+```{r mergenames}
+# Creating a new column to store the combined park names
+parks$merged_name <- parks$Name
+# merging specific park names
+parks$merged_name[parks$Name %in% c("Tymon Open Space", 
+                                    "Tymon Park East", 
+                                    "Tymon Park West")] <- "Tymon Park"
+parks$merged_name[parks$Name %in% c("Dodder Valley Park Cherryfield", 
+                                    "Dodder Valley Park Firhouse ", 
+                                    "Dodder Valley Park Kilvere", 
+                                    "Dodder Valley Park Oldbawn")] <- "Dodder Valley Park"
+parks$merged_name[parks$Name %in% c("Greentrees Park Eight Acres",         
+                                    "Greentrees Park Five Acres " )] <- "Greentrees Park"
+parks$merged_name[parks$Name %in% c("Griffeen Valley Park",               
+                                    "Griffeen Valley Park Extension",     
+                                    "Griffeen Valley Park Running Park",  
+                                    "Griffeen Valley Skate Park")] <- "Griffeen Valley Park"
+parks$merged_name[parks$Name %in% c("Clondalkin Park",                    
+                                    "Clondalkin Skate Park" )] <- "Clondalkin Park"
+# Creating a new df with only combined park names
+new_parks <- parks %>% 
+  group_by(merged_name) %>% 
+  summarise(park_area = sum(ShapeSTArea), .groups = 'keep')
+```
+
+In the code section above we have combined the parks which have been split into different pieces, namely Clondalkin Park, Dodder Valley Park, Greentrees Park, Griffeen Valley Park and Tymon Park. Below I have recreated the plot in Figure \@ref(fig:lollipop) but this time the split parks have been combined. 
+
+```{r lollipopv2, fig.align='center', fig.width = 10,fig.height = 7,  fig.cap="Plots of individual park area for parks in South Dublin with split parks combined."}
+# Creating a lollipop plot of each parks size
+plot1 <- new_parks %>%
+  ggplot(aes(x=merged_name, y=park_area)) +
+  geom_segment( aes(x=merged_name, xend=merged_name, y=0, yend=park_area), color="skyblue") +
+  geom_point( color="blue", size=4, alpha=0.6) +
+  theme_light() +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  labs(title="Park Area Lollipop Plot",
+       y=expression("Park Area "(m^2)),
+       x = "Merged Name") +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(hjust = 0.5),
+    axis.text.y = element_text(color = "grey20", size = 6,
+                               angle = 0, hjust = 1, 
+                               vjust = 0, face = "plain") )
+# Creating a bar plot of each parks size
+plot2 <- new_parks %>%
+  ggplot( aes(x=reorder(merged_name, park_area, sum), y=park_area)) +
+  geom_bar(stat="identity", fill="lightblue", width=.8) +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() + 
+  labs(title="Park Area Bar Plot",
+       y=expression("Park Area "(m^2)),
+       x = "Merged Name") +
+  theme(axis.text.y = element_text(color = "grey20", 
+                                   size = 6, angle = 0, 
+                                   hjust = 1, vjust = 0,
+                                   face = "plain"),
+        plot.title = element_text(hjust = 0.5))
+grid.arrange(plot1, plot2, ncol=2)
+
+```
+
+We can see from Figure \@ref(fig:lollipopv2) that combining the split parks has changed the results in terms of which parks has the biggest area. Tymon Park is now the largest park and Dodder Valley Park and Griffeen Park have moved higher up the ranking.
+
+The next piece of analysis in this section is based on the differences between each type of park in the data and uses the original park data.
+
+#### 1.2 Park Type Analysis
+
+This data contains `r length(unique(parks$grouptypename))` park types, namely `r paste0(unique(parks$grouptypename[-6]), collapse = ', ')` and Village Park. We can see a summary for each park type in the table below.
+```{r summary2}
+sum_tab2 <- parks %>%
+  group_by(grouptypename) %>%
+  summarise(count = n(),
+            mean = mean(ShapeSTArea),
+            min = min(ShapeSTArea),
+            max = max(ShapeSTArea),
+            median = median(ShapeSTArea),
+            first_quartile = quantile(ShapeSTArea, prob = 0.25),
+            third_quartile = quantile(ShapeSTArea, prob = 0.75),
+            .groups = 'keep')
+# Rounding summary values
+sum_tab2[,-1] <- round(sum_tab2[,-1])
+# Displaying the output in a table
+knitr::kable(sum_tab2, col.names = c('Park Type', 'count', 'mean',
+                                              'min', 'max', 'median',
+                                              'first_quartile', 
+                                              'third_quartile'))
+```
+
+The table above shows that regional parks have the largest mean area (418085$m^2$) while skate parks have the lowest mean area (478$m^2$). A box plot is an interesting visual representation of this data and can be seen below.
+
+```{r boxplot, fig.align='center', fig.height = 10, fig.width = 10, fig.cap="Box plots for the area of parks in South Dublin."}
+# Box plot for area of park
+p1 <- ggplot(parks, 
+             aes(x=reorder(grouptypename,
+                           ShapeSTArea,
+                           FUN = median),
+                 y=ShapeSTArea, 
+                 fill=grouptypename)) + 
+        geom_boxplot(outlier.shape=4, outlier.size=4) +
+        coord_flip() +
+        scale_y_continuous(labels = scales::comma) +
+        labs(title="Park Area Box Plot",
+             y=expression("Park Area "(m^2)),
+             x = "Park Type",
+             fill = "Park Type") +
+        theme(plot.title = element_text(hjust = 0.5))
+# Box plot for log area of park for readability
+p2 <- ggplot(parks, 
+             aes(x=reorder(grouptypename,
+                           log(ShapeSTArea),
+                           FUN = median),
+                 y=log(ShapeSTArea), 
+                 fill=grouptypename)) + 
+        geom_boxplot(outlier.shape=4, outlier.size=4) +
+        geom_dotplot(binaxis='y', stackdir='center', dotsize=0.4, binwidth = 0.4) +
+        coord_flip() +
+        labs(title="Log of Park Area Box Plot",
+             y=expression("Log Park Area "(m^2)),
+             x = "Park Type",
+             fill = "Park Type") +
+        theme(plot.title = element_text(hjust = 0.5))
+# Displaying plots
+grid.arrange(p1, p2, ncol=1)
+```
+
+The first plot in Figure \@ref(fig:boxplot) is a boxplot of the park area for each park type, we can see that regional parks have the highest median park area as we would expect from the previous table. However it is quite difficult to see the differences between the other park types in this plot. Therefore I have also created a boxplot of the log of the park area in South Dublin.
+
+In the second plot it is easier to see the differences between each park type because we have used the log of the park area instead of the park area. The dots on the second plot are a representation of where the log of each park area lies in the plot. The logs have been put into bins in this plot to aid with readability.
+
+In the second plot we can see a clear hierarchy in term of the types of park and the corresponding park areas.
+
+#### 1.3 Facility Analysis
+
+The next step in my analysis is to examine what type of facilities are available at each type of park.
+
+The data contains indicator variables which contain data on whether certain facilities are available at certain parks. Some examples of such facilities are caravan parks, parking and rose gardens. Firstly we look at which facilities are the most widely available. To do this we need to do some data preparation.
+
+```{r facilityprep}
+# creating a data tibble with the count of availability for each facility type
+facility_counts <- parks %>% 
+  group_by(grouptypename) %>% 
+  summarise(Parking = sum(Parking == 'Yes'),
+            Playgrounds = sum(Playground == 'Yes'),
+            Exercise = sum(AdultExerciseEquipment == 'Yes'),
+            Rose_Garden = sum(RoseGarden == 'Yes'),
+            Fairy_Wood = sum(FairyWood == 'Yes'),
+            Pet_Farm = sum(PetFarm == 'Yes'),
+            Cycle_Track = sum(CycleTrack == 'Yes'),
+            Allotments = sum(Allotments == 'Yes'),
+            Caravan_Park = sum(CaravanPark == 'Yes'),
+            Pitches = sum(Sports_PlayingPitches == 'Yes'),
+            Sensory_Garden = sum(SensoryGarden == 'Yes'),
+            Gym = sum(OutdoorGym == 'Yes'),
+            CCTV = sum(CCTV == 'Yes'),
+            Fishery = sum(Fishery == 'Yes'),
+            .groups = 'keep')
+# Using the melt function to reshape the data
+facility_dat <- melt(facility_counts, id.vars=c("grouptypename"))
+# Counting the occurrence of the availability of each facility
+overall_facilities <- facility_dat %>% 
+  group_by(variable) %>% 
+  summarise(count = sum(value), .groups = 'keep')
+# Printing output
+head(overall_facilities)
+```
+
+Once we have prepared the data we can use a bar plot to analyse the availability of each facility.
+```{r overallfac, fig.align='center', fig.cap="Bar plot of facility availability."}
+# converting tibble to df
+as.data.frame(overall_facilities) %>%
+  # setting the order for bars
+  mutate(variable = fct_reorder(variable, desc(-count))) %>%
+  # Creating the bar plot
+  ggplot( aes(x=variable, y=count)) +
+  geom_bar(stat="identity", fill="lightblue", width=.8) +
+  coord_flip() +
+  labs(title="Facility Availability",y="Count of Facility Availability", x = "Facility") +
+  theme(axis.text.y = element_text(color = "grey20", size = 10, angle = 0, hjust = 1, vjust = 0, face = "plain"),
+        plot.title = element_text(hjust = 0.5))
+```
+
+Figure \@ref(fig:overallfac) shows that playing pitches are the most common facility in the parks in this dataset. Sensory gardens and fisheries are the least common facility in these parks. Notably there has been a push in recent times by South Dublin County Council to put more outdoor gyms and outdoor exercise equipment in parks and open spaces. This is reflected in the data as these two facilities are the 4th and 5th most available facilities in these parks.
+
+Next we examine the spread of facilities across the different park types in the data.
+
+```{r typefac, fig.align='center', fig.cap="Bar plot of facility availability broken out by park type."}
+# Creating a vector of colours
+colvec <- distinctColorPalette(length(unique(facility_dat$variable)))
+# Creating a barplot of the facility availability by park type
+facility_dat[facility_dat$value>0,] %>% 
+        ggplot(aes(x = variable,  y = value, fill = variable))  +  
+        geom_col(position = "dodge") +
+        facet_grid(~grouptypename, 
+                   scales = "free_x", 
+                   space = "free_x", 
+                   switch = "x") +
+        theme(axis.text.x = element_blank(),
+              axis.ticks.x = element_blank(),
+              strip.background = element_blank(),
+              strip.text.x = element_text(angle = 90),
+              plot.title = element_text(hjust = 0.5)) + 
+        labs(title="Facility Availability by Park Type",
+             y= 'Count of Facility Availability',
+             x = "Park Type",
+             fill = "Facility") +
+        scale_fill_manual(values = colvec)
+```
+
+Figure \@ref(fig:typefac) shows the breakdown of facility availability for each park type. We can see that both skate parks and village parks have only one facility available which is parking. Regional parks have the broadest range of facilities available as we would expect because overall they are usually larger than other park types. Neighborhood parks also have a broad range of facilities available including playing pitches which are not available to the same extent in regional parks.
+
+Next we will create a map of where each of these parks is located in South Dublin.
+
+#### 1.4 Mapping
+This data came from the Irish government data website (https://data.gov.ie/dataset/parks-and-open-spaces1) and for this particular dataset a shapefile is also included. This shapefile can be used to create a choropleth map which can be overlayed onto a map of South Dublin.
+
+The first step in this process is to load the shapefile
+
+```{r mapping1}
+# Temporarily turning off warnings as readOGR gives a warning that has no effect on the data
+# Saving current warning settings
+ow <- options("warn")$warn
+# Turning off warnings
+options("warn"=-1)
+# Reading the shapefile
+my_spdf <- readOGR( 
+  dsn= "Parks_and_Recreation-shp" , 
+  layer="Parks_and_Recreation",
+  verbose=FALSE)
+# Restoring warning settings
+options("warn"=ow)
+```
+
+Once the shapefile has been read in we need to get the background for our map. This is done using the **get_stamenmap()** function which takes longitude and latitude coordinates and returns a map of the area specified in the coordinates. This function uses the open source map utility called Stamen maps.
+
+```{r, mapping2, message=F, fig.align='center', fig.cap="Map of South Dublin."}
+# Extracting the required map using get_stamenmap
+map <- get_stamenmap(bbox = c(left = -6.5, 
+                             bottom = 53.25, 
+                             right = -6.25, 
+                             top = 53.38),
+                    maptype = 'terrain',
+                    zoom = 14)
+# using ggmap to plot
+ggmap(map) + 
+  labs(title="Map of South Dublin",x="Longitude", y = "Latitude") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Next we need to add the parks to this background. Unfortunately the shapefile is not using the usual longitude and latitude coordinate system so some pre-processing is required.
+
+```{r mapping3, fig.align='center', fig.cap="Map of South Dublin."}
+# Changing coordinate system
+shp <- spTransform(my_spdf, CRS("+proj=longlat +datum=WGS84"))
+# tidying the shapefile
+shp_clean <- broom::tidy(shp)
+# Adding park type to cleaned data
+shp_clean$Park_Type <- my_spdf$grouptypen[as.numeric(shp_clean$id) + 1]
+# Adding park name to cleaned data
+shp_clean$Name <- my_spdf$Name[as.numeric(shp_clean$id) + 1]
+# Adding park size to cleaned data
+shp_clean$Size <- paste(round(my_spdf$ShapeSTAre[as.numeric(shp_clean$id) + 1]), expression(m^2))
+# Creating the plot
+ggmap(map) + 
+  geom_polygon(data = shp_clean, 
+               aes(x = long, y = lat, group = group, fill = Park_Type), 
+               colour = "black")  + 
+  labs(title="Map of South Dublin",x="Longitude", 
+       y = "Latitude", fill = "Park Type") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+This map shows the locations of the parks in this dataset on a real map of South Dublin however, Some of the smaller parks are quite difficult to see. To combat this issue we also show a map with highlights all parks using a point.
+
+```{r mapping4, fig.align='center', fig.cap="Map of South Dublin."}
+data_df <- as.data.frame(coordinates(shp))
+names(data_df) <- c("lon", "lat")
+data_df$Park_Type <- my_spdf$grouptypen
+data_df$Size <- my_spdf$ShapeSTAre
+data_df$Name <- my_spdf$Name
+
+colvec <- distinctColorPalette(length(unique(data_df$Park_Type)))
+ggmap(map) +
+  geom_point(aes(lon, lat, colour = Park_Type), size = 2.5, data = data_df) +
+  scale_fill_manual(values = colvec) + 
+  labs(title="Map of South Dublin",x="Longitude", 
+       y = "Latitude", colour = "Park Type") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+From Figure \@ref(fig:mapping4) all parks in the data set can be seen on the map with the colour indicating the type of park.
+
+I have also created animated versions of the map plots, unfortunately they will not be usable in pdf format therefore I have stored the animated versions on my github account here
+
+I am including the code for this graphs below.
+```{r animatedmap, fig.align='center', fig.cap="Map of South Dublin."}
+# Saving current warning settings
+ow <- options("warn")$warn
+# Turning off warnings
+options("warn"=-1)
+# Creating the plot
+ani_plot <- ggmap(map) + 
+  geom_polygon(data = shp_clean, 
+               aes(x = long, y = lat, group = group, fill = Park_Type, Name = Name, Size = Size), 
+               colour = "black")  + 
+  labs(title="Map of South Dublin",x="Longitude", 
+       y = "Latitude", fill = "Park Type") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Not allowing scientific notation
+options(scipen=999)
+# Restoring warning settings
+options("warn"=ow)
+# Creating the animated plot
+ggplotly(ani_plot, tooltip = c("Park_Type", "Name", "Size"))
+
+```
+
+```{r animatedmap2, fig.align='center', fig.cap="Map of South Dublin."}
+# Saving current warning settings
+ow <- options("warn")$warn
+# Turning off warnings
+options("warn"=-1)
+# Creating the plot
+animate_plot <- ggmap(map) +
+  geom_point(aes(lon, lat, colour = Park_Type,
+                 Size = Size, Name = Name), size = 2.5, data = data_df) +
+    scale_fill_manual(values = colvec) + 
+  labs(title="Map of South Dublin", x="Longitude", 
+       y = "Latitude", colour = "Park Type") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Not allowing scientific notation
+options(scipen=999)
+# Restoring warning settings
+options("warn"=ow)
+# Creating the animated plot
+ggploty_map <- ggplotly(animate_plot, tooltip = c("Park_Type", "Name", "Size"))
+# reformating the legend labels
+for (i in 1:length(ggploty_map$x$data)){
+  if (!is.null(ggploty_map$x$data[[i]]$name)){
+    ggploty_map$x$data[[i]]$name =  gsub("\\(","",str_split(ggploty_map$x$data[[i]]$name,",")[[1]][1])
+  }
+}
+# Producing the animated plot
+ggploty_map
+
+```
+
+#### 1.5 Conclusion
+
+Overall this dataset has been quite interesting to analyse. This dataset contained some problems with missing values redundant variables and blank values which had to be dealt with. We have seen which parks are the largest and smallest in the data as well as examining the distribution of the park size. We have also examined the facilities on offer at each of the parks and plotted the parks on an real map of South Dublin.
